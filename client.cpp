@@ -1,98 +1,60 @@
+#include "client.h"
 #include "const.h"
-#include "server.h"
 #include <QJsonParseError>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
-#include <QNetworkInterface>
 
-Server::Server(QObject *parent)
-    : QObject{parent}
+Client::Client()
 {
-    server = new QTcpServer(this);
     socket = new QTcpSocket(this);
-    sync = -2; // why
-}
-
-void Server::startServer(const QString &name) {
-    connect(server, SIGNAL(newConnection()), this, SLOT(newConnection()));
-
-    QHostAddress ipAddress;
-    QList<QHostAddress> ipAddressesList = QNetworkInterface::allAddresses();
-    // use the first non-localhost IPv4 address
-    for (int i = 0; i < ipAddressesList.size(); ++i) {
-        if (ipAddressesList.at(i) != QHostAddress::LocalHost &&
-            ipAddressesList.at(i).toIPv4Address()) {
-            ipAddress = ipAddressesList.at(i);
-            break;
-        }
-    }
-    // if we did not find one, use IPv4 localhost
-    if (ipAddress.isNull()) {
-        ipAddress = QHostAddress::LocalHost;
-    }
-    if (!server->listen(QHostAddress::Any, server->serverPort())) {
-        qDebug() << "cannot start server";
-        emit serverError(server->errorString());
-    } else {
-        qDebug() << "server is on" << ipAddress.toString() << ":" << server->serverPort();
-        myName = name;
-        ipAddr = ipAddress.toString();
-        emit serverStarted();
-    }
-}
-
-void Server::stopServer() {
-    socket->close();
-    server->close();
     myName = "";
     opponentName = "";
-    qDebug() << "server is stopped";
-    emit serverStopped();
+    sync = -1;
 }
 
-// TODO: handle this
-void Server::newConnection() {
-    if (socket->state() == QTcpSocket::ConnectedState) {
-        QTcpSocket *s = server->nextPendingConnection();
-        QDataStream stream(s);
-        stream.setVersion(QDataStream::Qt_6_0);
+void Client::connectToHost(QString ip, quint16 port, QString name) {
+    qDebug() << name << "is trying to connect...";
+    this->myName = name;
 
-        // TODO: should we emit serverError here?
-        QJsonObject msg;
-        msg[TYPE] = CONNECT;
-        msg[CONTENT] = REJECTED;
-        msg[SYN] = "server already in use";
+    connect(socket, SIGNAL(connected()), this, SLOT(connected()));
+    connect(socket, SIGNAL(disconnected()), this, SLOT(disconnected()));
+    connect(socket, SIGNAL(readyRead()), this, SLOT(readyRead()));
+    connect(socket, SIGNAL(errorOccurred(QAbstractSocket::SocketError)), this, SLOT(errorOccurred(QAbstractSocket::SocketError)));
 
-        stream << QJsonDocument(msg).toJson();
-        s->waitForBytesWritten(3000);
-        s->close();
-        // should we call s->close() here?
-        return;
+    socket->connectToHost(ip, port);
+    if (!socket->waitForConnected(3000)) {
+        qDebug() << name << "connect error";
+        emit clientError(socket->errorString());
+        endConnection();
     }
-    socket = server->nextPendingConnection();
-    connect(socket, &QTcpSocket::readyRead, this, &Server::readyRead);
-    connect(socket, &QTcpSocket::disconnected, this, &Server::disconnected);
-    connect(socket, &QTcpSocket::errorOccurred, this, &Server::errorOccurred);
-    qDebug() << "new connection";
 }
 
-// TODO: need handle?
-void Server::disconnected() {
+void Client::connected() {
+    qDebug() << myName << "is connected";
+    sendMessage(CONNECT, REQUEST, myName);
+}
+
+// TODO: handle this?
+void Client::disconnected() {
     qDebug() << myName << "is disconnected";
-//    emit serverError(myName + "is disconnected");
-//    stopServer();
-//    stop somewhere else?
+    //endConnection();
 }
 
-void Server::errorOccurred(QAbstractSocket::SocketError e) {
-    Q_UNUSED(e)
+void Client::errorOccurred(QAbstractSocket::SocketError e) {
+    Q_UNUSED(e);
     qDebug() << myName << "error:" << socket->errorString();
-    emit serverError(socket->errorString());
-    //stopServer();
+    emit clientError(socket->errorString());
+    //endConnection();
 }
 
-void Server::readyRead() {
+void Client::endConnection() {
+    socket->close();
+    myName = "";
+    opponentName = "";
+}
+
+void Client::readyRead() {
     // prepare a container to hold the UTF-8 encoded JSON we receive from the socket
     QByteArray jsonData;
     // create a QDataStream operating on the socket
@@ -126,7 +88,7 @@ void Server::readyRead() {
     }
 }
 
-void Server::messageReceived(const QJsonObject &obj) {
+void Client::messageReceived(const QJsonObject &obj) {
     const QJsonValue type = obj.value(QLatin1String(TYPE));
     const QJsonValue content = obj.value(QLatin1String(CONTENT));
     const QJsonValue synVal = obj.value(QLatin1String(SYN));
@@ -140,7 +102,7 @@ void Server::messageReceived(const QJsonObject &obj) {
     // for those which only require field TYPE
     // i.e. LEAVE
     if (type.toString().compare(QLatin1String(LEAVE), Qt::CaseInsensitive) == 0) {
-        qDebug() << "msg: opponent leave";
+        qDebug() << "msg: opponent left";
         emit opponentQuit();
     }
 
@@ -159,6 +121,7 @@ void Server::messageReceived(const QJsonObject &obj) {
             qDebug() << "msg: opponent quit";
             emit opponentQuit();
         }
+        return;
     }
 
     if (synVal.isNull()) {
@@ -173,42 +136,50 @@ void Server::messageReceived(const QJsonObject &obj) {
             qDebug() << "err: expecting a string SYN";
             return;
         }
-        if (content.toString().compare(QLatin1String(REQUEST), Qt::CaseInsensitive) == 0) {
+        if (content.toString().compare(QLatin1String(ACCEPTED), Qt::CaseInsensitive) == 0) {
             opponentName = synVal.toString();
-            qDebug() << "msg:" << opponentName << "request to connect";
-            emit serverConnected();
-            sendMessage(CONNECT, ACCEPTED, myName);
-        } else if (content.toString().compare(QLatin1String(ACCEPTED), Qt::CaseInsensitive) == 0) {
+            qDebug() << "msg: " << "accepted the connection request";
+            emit clientConnected();
+            sendMessage(CONNECT, ACCEPTED, "0");
+            //emit gameStart();
             qDebug() << "msg: game start";
-            emit gameStart();
+        } else if (content.toString().compare(QLatin1String(REJECTED), Qt::CaseInsensitive) == 0) {
+            qDebug() << "err: client connect error";
+            emit clientError(synVal.toString());
+            endConnection();
         }
+        // otherwise is not a valid message, so just ignore it
         return;
     }
 
     // then, check SYN == sync + 1
+    // EITHER ignore if not synchronized (will ignore cause problems?)
+    // OR ask for resend?
     if (!synVal.isDouble()) {
         qDebug() << "err: syn is not a double";
         return;
     }
     if (synVal.toInt() != sync + 1) {
-        qDebug() << "err: sync out of order: expected" << sync + 1 << ", got" << synVal.toInt();
+        // TODO: how should we handle this?
+        qDebug() << "err: sync out of order; expected" << sync + 1 << ", got" << synVal.toInt();
         return;
     }
 
     // then, handle those which do not need field CONTENT
     // i.e. SKIP, YIELD
     if (type.toString().compare(QLatin1String(SKIP), Qt::CaseInsensitive) == 0) {
-        qDebug() << "msg: skip";
         emit opponentSkip();
+        qDebug() << "msg: skip";
         return;
     } else if (type.toString().compare(QLatin1String(YIELD), Qt::CaseInsensitive) == 0) {
-        qDebug() << "msg: yield";
         emit opponentYield();
+        qDebug() << "msg: yield";
         return;
     }
 
     // last, handle the rest
     // i.e. MOVE, REGRET
+
     QStringList move = content.toString().split(SEP);
     if (type.toString().compare(QLatin1String(MOVE), Qt::CaseInsensitive) == 0) {
         if (move.length() != 2) {
@@ -238,7 +209,7 @@ void Server::messageReceived(const QJsonObject &obj) {
     }
 }
 
-void Server::sendMessage(const QString &type, const QString &content, const QString &syn) {
+void Client::sendMessage(const QString &type, const QString &content, const QString &syn) {
     QDataStream stream(socket);
     stream.setVersion(QDataStream::Qt_6_0);
 
@@ -251,23 +222,15 @@ void Server::sendMessage(const QString &type, const QString &content, const QStr
         qDebug() << "sent: {type:" << type << ", content:" << content << ", sync:" << msg[SYN] << "}";
     } else {
         msg[SYN] = syn;
-        qDebug() << "sent: {type:" << type << ", content:" << content << ", syn:" << msg[SYN] << "}";
+        qDebug() << "sent: {type:" << type << ", content:" << content << ", syn:" <<  msg[SYN] << "}";
     }
     stream << QJsonDocument(msg).toJson();
 }
 
-const QString Server::getIpAddress() {
-    return ipAddr;
-}
-
-quint16 Server::getPort() {
-    return server->serverPort();
-}
-
-const QString Server::getMyName() {
+const QString Client::getMyName() {
     return myName;
 }
 
-const QString Server::getOpponentName() {
+const QString Client::getOpponentName() {
     return opponentName;
 }

@@ -1,32 +1,29 @@
-#ifndef SERVER_H
-#define SERVER_H
+#ifndef CLIENT_H
+#define CLIENT_H
 
+#include <QDebug>
 #include <QObject>
-#include <QTcpServer>
+#include <QDataStream>
 #include <QTcpSocket>
 
-class Server : public QObject
+class Client: public QObject
 {
     Q_OBJECT
 public:
-    explicit Server(QObject *parent = nullptr);
-    void startServer(const QString &name);
-    void stopServer();
+    Client();
+    void connectToHost(QString ip, quint16 port, QString name);
     void sendMessage(const QString &type, const QString &content, const QString &syn);
+    void endConnection();
     const QString getMyName();
     const QString getOpponentName();
-    const QString getIpAddress();
-    quint16 getPort();
 
 signals:
-    void serverStarted();
-    void serverConnected();
-    void serverStopped(); // not handled // necessary?
-    void serverError(const QString &msg);
-    void opponentReady();
-    void opponentQuit();
+    void clientConnected();
+    void clientError(const QString &err);
     void gameStart();
     void setCellAt(uint x, uint y);
+    void opponentReady();
+    void opponentQuit();
     void opponentSkip();
     void opponentYield();
     void opponentRequestRegret();
@@ -34,19 +31,17 @@ signals:
     void regretRequestRejected();
 
 private slots:
-    void newConnection();
-    void readyRead();
+    void connected();
     void disconnected();
+    void readyRead();
     void errorOccurred(QAbstractSocket::SocketError e);
 
 private:
     void messageReceived(const QJsonObject &obj);
 
-    QTcpServer *server;
     QTcpSocket *socket;
     QString myName, opponentName;
-    QString ipAddr;
     int sync;
 };
 
-#endif // SERVER_H
+#endif // CLIENT_H
